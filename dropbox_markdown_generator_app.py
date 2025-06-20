@@ -126,26 +126,26 @@ st.set_page_config(page_title="Dropbox Markdown Generator", page_icon="★")
 st.title("★ Dropbox Markdown Link Generator")
 
 # Input: Dropbox Access Token
-st.text_input("🔐 Dropbox Access Token", type="password", key="access_token")
+token = st.text_input("🔐 Dropbox Access Token", type="password", key="access_token")
 
 # Input: Dropbox Folder Path
-path = st.text_input("📁 Dropbox Folder Path (e.g., /PIAS testing)", value="/", key="folder_path")
+folder_path = st.text_input("📁 Dropbox Folder Path (e.g., /PIAS testing)", value="/", key="folder_path")
 
 # Input: Desired Markdown filename
-filename = st.text_input("📝 Output Markdown File Name", value="Sources.md", key="output_filename")
+output_filename = st.text_input("📝 Output Markdown File Name", value="Sources.md", key="output_filename")
 
 # Input: Optional filter text
-keyword = st.text_input("🔍 Optional Filter (filename contains…)", value="", key="filter_text")
+filter_keyword = st.text_input("🔍 Optional Filter (filename contains…)", value="", key="filter_text")
 
 # Cancel button logic (store in session_state)
 cancel_flag = st.session_state.get("cancel", False)
-if st.button("✘ Cancel"):
+if st.button("✘ Cancel", key = "cancel button"):
     st.session_state["cancel"] = True
 else:
     st.session_state["cancel"] = False
 
 # Generate Markdown button
-if st.button("➤ Generate Markdown"):
+if st.button("➤ Generate Markdown", key = "generate_button"):
     if not token or not folder_path or not output_filename:
         st.error("⚠ Please fill in all required fields.")
     else:
