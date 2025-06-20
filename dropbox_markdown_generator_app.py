@@ -126,16 +126,16 @@ st.set_page_config(page_title="Dropbox Markdown Generator", page_icon="★")
 st.title("★ Dropbox Markdown Link Generator")
 
 # Input: Dropbox Access Token
-token = st.text_input("🔑 Dropbox Access Token", type="password")
+st.text_input("🔐 Dropbox Access Token", type="password", key="access_token")
 
 # Input: Dropbox Folder Path
-folder_path = st.text_input("📂 Dropbox Folder Path (e.g., /PIAS testing)", value="/")
+path = st.text_input("📁 Dropbox Folder Path (e.g., /PIAS testing)", value="/", key="folder_path")
 
 # Input: Desired Markdown filename
-output_filename = st.text_input("📝 Output Markdown File Name", value="Sources.md")
+filename = st.text_input("📝 Output Markdown File Name", value="Sources.md", key="output_filename")
 
 # Input: Optional filter text
-filter_keyword = st.text_input("🔍 Optional Filter (filename contains…)", value="")
+keyword = st.text_input("🔍 Optional Filter (filename contains…)", value="", key="filter_text")
 
 # Cancel button logic (store in session_state)
 cancel_flag = st.session_state.get("cancel", False)
