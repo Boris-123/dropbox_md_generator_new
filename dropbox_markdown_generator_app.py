@@ -78,20 +78,20 @@ if token:
 
         @st.cache_data(show_spinner=False)
         def mounts():
-            root_list = dbx.files_list_folder("", include_mounted_folders=True).entries
-            return sorted((e.path_display or "/").lstrip("/") for e in root_list if isinstance(e, dropbox.files.FolderMetadata))
+            root_entries = dbx.files_list_folder("", include_mounted_folders=True).entries
+            return sorted((e.path_display or "/") for e in root_entries if isinstance(e, dropbox.files.FolderMetadata))
 
         root_pick = st.selectbox("📂 Mounted folders", mounts())
-        manual = st.text_input("✏️ Custom path", placeholder="PAB One Bot")
-        path = (manual.strip() or root_pick).lstrip("/")  # API wants NO leading slash
+        manual = st.text_input("✏️ Custom path", placeholder="/PAB One Bot").strip()
+        path = manual if manual else root_pick  # keep leading slash
 
         if st.button("🔍 Preview") and path:
             exts = (".pdf",) if kind == "PDF" else (".xlsx", ".xls", ".xlsm")
-            st.info(f"🔢 {len(gather(dbx, path if path!="/" else '', exts))} file(s) match")
+            st.info(f"🔢 {len(gather(dbx, path if path != "/" else "", exts))} file(s) match")
 
         if st.button("➤ Generate Markdown") and path:
             exts = (".pdf",) if kind == "PDF" else (".xlsx", ".xls", ".xlsm")
-            files = gather(dbx, path if path!="/" else '', exts)
+            files = gather(dbx, path if path != "/" else "", exts)
             if flt:
                 files = [f for f in files if flt.lower() in f.name.lower()]
             md = make_md(dbx, files, lambda: cancel_btn)
