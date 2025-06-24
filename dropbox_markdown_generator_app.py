@@ -5,12 +5,12 @@ import os, io, time, datetime
 from collections import defaultdict
 
 """
-Dropbox Markdown Generator  –  Namespace-aware
+Dropbox Markdown Generator  –  Namespace‑aware
 =============================================
 Works whether the target folder is:
-* a **member-root** folder
+* a **member‑root** folder
 * a **mounted team folder**
-* a **pure team-space folder** that is *not mounted*
+* a **pure team‑space folder** that is *not mounted*
 
 Strategy
 --------
@@ -19,9 +19,9 @@ Strategy
     • If it returns `not_found`, extract the *first segment* (`foo`).
 2.  Query `sharing_list_folders()`  and  `team/team_folder/list` to map that
     first segment → **namespace_id**.
-3.  Re-run the call via `dbx.with_path_root(PathRoot.namespace_id(ns_id))`.
+3.  Re‑run the call via `dbx.with_path_root(PathRoot.namespace_id(ns_id))`.
 
-No UI changes – the dropdown + custom-path boxes stay the same.
+No UI changes – the dropdown + custom‑path boxes stay the same.
 """
 
 # ────────────────────────── helpers ──────────────────────────
@@ -106,7 +106,7 @@ def markdown_from_files(dbx, files, cancel):
 # ───────────────────────────── UI ─────────────────────────────
 
 st.set_page_config(page_title="Dropbox Markdown", page_icon="★")
-st.title("★ Dropbox Markdown – Namespace-aware")
+st.title("★ Dropbox Markdown – Namespace‑aware")
 
 token = st.text_input("🔐 Dropbox access token", type="password")
 output = st.text_input("📝 Output .md", "Sources.md")
