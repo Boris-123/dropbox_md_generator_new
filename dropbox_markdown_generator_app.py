@@ -121,6 +121,15 @@ if token:
         account = dbx.users_get_current_account()
         st.success(f"✔ Authenticated as: {account.name.display_name}")
 
+        # Show available mount points (debug and guidance)
+        try:
+            mounts = dbx.files_list_folder(path="").entries
+            st.markdown("#### 🗂 Available root folders:")
+            for entry in mounts:
+                st.write(entry.name)
+        except Exception as e:
+            st.warning(f"⚠ Unable to list visible root folders: {e}")
+
         if st.button("➤ Generate Markdown", key="generate_button"):
             if not folder_path or not output_filename:
                 st.error("⚠ Please fill in all required fields.")
