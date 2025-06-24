@@ -1,4 +1,3 @@
-
 import streamlit as st
 import dropbox
 import os
@@ -12,36 +11,18 @@ from collections import defaultdict
 # -------------------------------
 
 def force_direct_download(url: str) -> str:
-    """Convert Dropbox preview URL to a direct‐download URL."""
     return url.replace("&dl=0", "&dl=1")
 
 def gather_all_pdfs(dbx: dropbox.Dropbox, path: str) -> list:
-    """Recursively gather all PDF files under the given Dropbox path."""
     result = dbx.files_list_folder(path, recursive=True)
     entries = list(result.entries)
     while result.has_more:
         result = dbx.files_list_folder_continue(result.cursor)
         entries.extend(result.entries)
-
-    return [
-        e for e in entries
-        if isinstance(e, dropbox.files.FileMetadata)
-        and e.name.lower().endswith(".pdf")
-    ]
+    return [e for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.name.lower().endswith(".pdf")]
 
 def generate_sources(dbx: dropbox.Dropbox, pdfs: list, cancel_flag, filter_keyword: str = "") -> list:
-    """
-    Generate grouped Markdown lines by full folder path, with:
-        • Progress bar
-        • Current status
-        • ETA
-        • Cancel support
-        • Optional filename filter
-    """
     grouped = defaultdict(list)
-    total = len(pdfs)
-
-    # Group by the full nested path under the root
     for item in pdfs:
         parts = item.path_display.strip("/").split("/")
         if len(parts) > 2:
@@ -53,19 +34,13 @@ def generate_sources(dbx: dropbox.Dropbox, pdfs: list, cancel_flag, filter_keywo
         grouped[folder_path].append(item)
 
     lines = ["# Document Sources\n\n"]
-
-    # Initialize Streamlit progress elements
     progress_bar = st.progress(0.0)
     status_text = st.empty()
     time_text = st.empty()
 
-    # If a filter keyword is provided, drop any files whose names do not contain it
     if filter_keyword:
         for folder in list(grouped.keys()):
-            grouped[folder] = [
-                f for f in grouped[folder]
-                if filter_keyword.lower() in f.name.lower()
-            ]
+            grouped[folder] = [f for f in grouped[folder] if filter_keyword.lower() in f.name.lower()]
 
     total_filtered = sum(len(grouped[fld]) for fld in grouped)
     if total_filtered == 0:
@@ -78,10 +53,8 @@ def generate_sources(dbx: dropbox.Dropbox, pdfs: list, cancel_flag, filter_keywo
     for folder in sorted(grouped.keys()):
         if not grouped[folder]:
             continue
-
         lines.append(f"## {folder}\n\n")
         for item in grouped[folder]:
-            # Allow user to cancel mid‐process
             if cancel_flag():
                 status_text.warning("✘ Generation cancelled by user.")
                 return lines
@@ -91,7 +64,6 @@ def generate_sources(dbx: dropbox.Dropbox, pdfs: list, cancel_flag, filter_keywo
             progress_bar.progress(progress)
             status_text.text(f"[{processed}/{total_filtered}] Processing: {item.name}")
 
-            # Compute and display ETA
             elapsed = time.time() - start_time
             avg_time = elapsed / processed
             eta_sec = int(avg_time * (total_filtered - processed))
@@ -120,68 +92,59 @@ def generate_sources(dbx: dropbox.Dropbox, pdfs: list, cancel_flag, filter_keywo
 # Streamlit Interface
 # -------------------------------
 
-# Use a BMP‐safe icon or None here to avoid surrogate errors on Windows
 st.set_page_config(page_title="Dropbox Markdown Generator", page_icon="★")
-
 st.title("★ Dropbox Markdown Link Generator")
 
-# Input: Dropbox Access Token
 token = st.text_input("🔐 Dropbox Access Token", type="password", key="access_token")
-
-# Input: Dropbox Folder Path
 folder_path = st.text_input("📁 Dropbox Folder Path (e.g., /PIAS testing)", value="/", key="folder_path")
-
-# Input: Desired Markdown filename
 output_filename = st.text_input("📝 Output Markdown File Name", value="Sources.md", key="output_filename")
-
-# Input: Optional filter text
 filter_keyword = st.text_input("🔍 Optional Filter (filename contains…)", value="", key="filter_text")
 
-# Cancel button logic (store in session_state)
 cancel_flag = st.session_state.get("cancel", False)
-if st.button("✘ Cancel", key = "cancel button"):
+if st.button("✘ Cancel", key="cancel button"):
     st.session_state["cancel"] = True
 else:
     st.session_state["cancel"] = False
 
-# Generate Markdown button
-if st.button("➤ Generate Markdown", key = "generate_button"):
-    if not token or not folder_path or not output_filename:
-        st.error("⚠ Please fill in all required fields.")
-    else:
-        try:
-            # Authenticate to Dropbox
-            dbx = dropbox.Dropbox(token)
-            account = dbx.users_get_current_account()
-            st.success(f"✔ Authenticated as: {account.name.display_name}")
+if token:
+    try:
+        dbx_team = dropbox.DropboxTeam(token)
+        members = dbx_team.team_members_list().members
+        member_options = {
+            f"{m.profile.email} → {m.profile.team_member_id}": m.profile.team_member_id
+            for m in members
+        }
+        selected_display = st.selectbox("👤 Select your Dropbox Identity", list(member_options.keys()))
+        selected_team_member_id = member_options[selected_display]
+        dbx = dbx_team.as_user(selected_team_member_id)
 
-            # List all PDFs under the given folder
-            pdfs = gather_all_pdfs(dbx, folder_path)
-            st.write(f"Found {len(pdfs)} PDF(s) in the specified folder.")
+        account = dbx.users_get_current_account()
+        st.success(f"✔ Authenticated as: {account.name.display_name}")
 
-            # Generate the markdown lines (with progress & cancel support)
-            lines = generate_sources(
-                dbx,
-                pdfs,
-                cancel_flag=lambda: st.session_state["cancel"],
-                filter_keyword=filter_keyword
-            )
+        if st.button("➤ Generate Markdown", key="generate_button"):
+            if not folder_path or not output_filename:
+                st.error("⚠ Please fill in all required fields.")
+            else:
+                pdfs = gather_all_pdfs(dbx, folder_path)
+                st.write(f"Found {len(pdfs)} PDF(s) in the specified folder.")
+                lines = generate_sources(
+                    dbx,
+                    pdfs,
+                    cancel_flag=lambda: st.session_state["cancel"],
+                    filter_keyword=filter_keyword
+                )
 
-            # Ensure the filename ends with .md
-            if not output_filename.lower().endswith(".md"):
-                output_filename += ".md"
+                if not output_filename.lower().endswith(".md"):
+                    output_filename += ".md"
 
-            # Create an in‐memory text buffer and push to download button
-            output_buffer = io.StringIO()
-            output_buffer.writelines(lines)
+                output_buffer = io.StringIO()
+                output_buffer.writelines(lines)
 
-            st.download_button(
-                label="⬇ Download Markdown File",
-                data=output_buffer.getvalue(),
-                file_name=output_filename,
-                mime="text/markdown"
-            )
-
-        except Exception as e:
-            st.error(f"✘ Error: {e}")
-
+                st.download_button(
+                    label="⬇ Download Markdown File",
+                    data=output_buffer.getvalue(),
+                    file_name=output_filename,
+                    mime="text/markdown"
+                )
+    except Exception as e:
+        st.error(f"✘ Error: {e}")
