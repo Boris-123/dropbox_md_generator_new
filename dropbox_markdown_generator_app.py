@@ -13,17 +13,17 @@ from collections import defaultdict
 def force_direct_download(url: str) -> str:
     return url.replace("&dl=0", "&dl=1")
 
-def gather_all_pdfs(dbx: dropbox.Dropbox, path: str) -> list:
+def gather_all_files(dbx: dropbox.Dropbox, path: str, ext: str) -> list:
     result = dbx.files_list_folder(path, recursive=True)
     entries = list(result.entries)
     while result.has_more:
         result = dbx.files_list_folder_continue(result.cursor)
         entries.extend(result.entries)
-    return [e for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.name.lower().endswith(".pdf")]
+    return [e for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.name.lower().endswith(ext)]
 
-def generate_sources(dbx: dropbox.Dropbox, pdfs: list, cancel_flag, filter_keyword: str = "") -> list:
+def generate_sources(dbx: dropbox.Dropbox, files: list, cancel_flag, filter_keyword: str = "") -> list:
     grouped = defaultdict(list)
-    for item in pdfs:
+    for item in files:
         parts = item.path_display.strip("/").split("/")
         if len(parts) > 2:
             folder_path = "/".join(parts[1:-1])
@@ -122,7 +122,7 @@ if token:
         account = dbx.users_get_current_account()
         st.success(f"✔ Authenticated as: {account.name.display_name}")
 
-        def get_all_folders(path=""):
+        def get_all_folders(path="/"):
             folder_list = []
             try:
                 entries = dbx.files_list_folder(path, recursive=True).entries
@@ -136,6 +136,8 @@ if token:
 
         folder_choices = get_all_folders()
         selected_folder_path = st.selectbox("📂 Choose a folder to scan:", folder_choices)
+        manual_folder_path = st.text_input("✏️ Or enter a custom folder path:")
+        final_path = manual_folder_path if manual_folder_path else selected_folder_path
 
         if st.button("➤ Generate Markdown", key="generate_button"):
             if not output_filename:
@@ -143,12 +145,11 @@ if token:
             else:
                 try:
                     ext = ".pdf" if type_filter == "PDF" else ".xlsx"
-                    pdfs = gather_all_pdfs(dbx, selected_folder_path)
-                    files_filtered = [f for f in pdfs if f.name.lower().endswith(ext)]
-                    st.write(f"📄 Found {len(files_filtered)} {type_filter} file(s) in the folder.")
+                    files = gather_all_files(dbx, final_path, ext)
+                    st.write(f"📄 Found {len(files)} {type_filter} file(s) in the folder.")
                     lines = generate_sources(
                         dbx,
-                        files_filtered,
+                        files,
                         cancel_flag=lambda: st.session_state["cancel"],
                         filter_keyword=filter_keyword
                     )
