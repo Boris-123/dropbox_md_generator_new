@@ -10,10 +10,10 @@ except ImportError:  # pragma: no cover – fallback for old SDK
     PathRoot = None  # sentinel so we can branch later
 
 """
-Dropbox Markdown Generator – **SDK-version tolerant**
+Dropbox Markdown Generator – **SDK‑version tolerant**
 ----------------------------------------------------
-* Works with *any* dropbox-python version (PathRoot present or not).
-* Resolves team-space namespaces when a folder is not found in member root.
+* Works with *any* dropbox‑python version (PathRoot present or not).
+* Resolves team‑space namespaces when a folder is not found in member root.
 * UI unchanged: user types `/PAB One Bot` or deeper path.
 """
 
@@ -102,7 +102,7 @@ def build_md(dbx, files, cancel_fn):
 # ───────────────────────────── UI ─────────────────────────────
 
 st.set_page_config(page_title="Dropbox Markdown", page_icon="★")
-st.title("★ Dropbox Markdown – SDK-Version Safe")
+st.title("★ Dropbox Markdown – SDK‑Version Safe")
 
 token = st.text_input("🔐 Access token", type="password")
 path_in = st.text_input("✏️ Folder path (e.g. /PAB One Bot)")
@@ -115,7 +115,15 @@ if token and path_in:
         team = dropbox.DropboxTeam(token)
         members = team.team_members_list().members
         user_email = st.selectbox("Act as", [m.profile.email for m in members])
-        dbx_user = team.as_user(next(m.profile.team_member_id for m in members if m.profile.email == user_email))
+                # create a member‑scoped client that always carries Dropbox‑API‑Select‑User
+        try:
+            dbx_user = team.as_user(next(m.profile.team_member_id for m in members if m.profile.email == user_email))
+        except AttributeError:  # very old SDK – inject header manually
+            member_id = next(m.profile.team_member_id for m in members if m.profile.email == user_email)
+            dbx_user = dropbox.Dropbox(
+                team._oauth2_access_token,
+                headers={"Dropbox-API-Select-User": member_id},
+            )
         st.success("Authenticated ✔")
         exts = (".pdf",) if kind == "PDF" else (".xlsx", ".xls", ".xlsm")
         dbx_resolved, files = fetch_files(dbx_user, team, path_in, exts)
