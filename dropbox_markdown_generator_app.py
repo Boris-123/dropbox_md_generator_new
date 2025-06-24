@@ -1,147 +1,116 @@
 import streamlit as st
 import dropbox
-import os
-import io
-import time
-import datetime
+import os, io, time, datetime
 from collections import defaultdict
 
 """
-Dropbox Markdown Link Generator – Team‑Aware
-===========================================
-• Lists **all mount‑points** (personal + team folders) for the chosen user
-• Allows manual path entry (auto‑sanitised)
-• Pre‑views PDF / Excel file counts
-• Works with Dropbox Business **Team‑Member File Access** tokens
+**Key fix** – Dropbox root must be passed as an **empty string** (``""``), *never* ``"/"``.
+We now:
+1. List *mounted* root folders with path="" and ``include_mounted_folders=True``
+2. Allow manual entry (auto‐strip redundant spaces)  
+3. Generate Markdown links for PDF/Excel
 """
 
 # ──────────────────────────────────────────────
-# Utility helpers
+# Helpers
 # ──────────────────────────────────────────────
 
-def force_direct_download(url: str) -> str:
-    """Convert ?dl=0/preview links to ?dl=1 direct links."""
-    return url.replace("&dl=0", "&dl=1").replace("?dl=0", "?dl=1")
+def force_dl(url: str) -> str:
+    return url.replace("?dl=0", "?dl=1").replace("&dl=0", "&dl=1")
 
 
-def gather_files(dbx: dropbox.Dropbox, root: str, ext_tuple: tuple[str]) -> list:
-    """Return all FileMetadata objects whose names end with `ext_tuple`."""
-    result = dbx.files_list_folder(root, recursive=True)
-    entries = list(result.entries)
-    while result.has_more:
-        result = dbx.files_list_folder_continue(result.cursor)
-        entries.extend(result.entries)
-    return [e for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.name.lower().endswith(ext_tuple)]
+def gather(dbx: dropbox.Dropbox, root: str, exts: tuple[str]) -> list:
+    res = dbx.files_list_folder(root, recursive=True)
+    files = list(res.entries)
+    while res.has_more:
+        res = dbx.files_list_folder_continue(res.cursor)
+        files.extend(res.entries)
+    return [f for f in files if isinstance(f, dropbox.files.FileMetadata) and f.name.lower().endswith(exts)]
 
 
-def group_by_subfolder(files):
-    grouped = defaultdict(list)
+def group(files):
+    g = defaultdict(list)
     for f in files:
-        # drop initial slash and split full path
-        parts = f.path_display.lstrip("/").split("/")
-        folder = "/".join(parts[:-1]) if len(parts) > 1 else "Root"
-        grouped[folder].append(f)
-    return grouped
+        folder = os.path.dirname(f.path_display).lstrip("/") or "Root"
+        g[folder].append(f)
+    return g
 
 
-def build_markdown(dbx, files, cancel_fn):
-    grouped = group_by_subfolder(files)
+def make_md(dbx, files, cancel):
+    grouped = group(files)
     total = sum(len(v) for v in grouped.values())
-    if total == 0:
+    if not total:
         return []
-
-    bar = st.progress(0.0)
-    stat = st.empty()
-    eta_box = st.empty()
-    t0 = time.time()
-    processed = 0
-    md_lines = ["# Document Sources\n\n"]
-
-    for folder in sorted(grouped.keys()):
-        md_lines.append(f"## {folder} ({len(grouped[folder])})\n\n")
+    bar, stat, eta = st.progress(0.), st.empty(), st.empty()
+    t0, done = time.time(), 0
+    md = ["# Document Sources\n\n"]
+    for folder in sorted(grouped):
+        md.append(f"## {folder} ({len(grouped[folder])})\n\n")
         for f in grouped[folder]:
-            if cancel_fn():
-                stat.warning("✘ Generation cancelled.")
-                return md_lines
-            processed += 1
-            bar.progress(processed / total)
-            elapsed = time.time() - t0
-            eta = datetime.timedelta(seconds=int(elapsed / processed * (total - processed)))
-            stat.text(f"[{processed}/{total}] {os.path.basename(f.path_display)}")
-            eta_box.text(f"⌛ ETA {eta}")
-
+            if cancel():
+                stat.warning("✘ Cancelled"); return md
+            done += 1; bar.progress(done/total)
+            stat.text(f"[{done}/{total}] {f.name}")
+            eta.text(f"⌛ ETA {datetime.timedelta(seconds=int((time.time()-t0)/done*(total-done)))}")
             try:
                 links = dbx.sharing_list_shared_links(path=f.path_lower, direct_only=True).links
                 url = links[0].url if links else dbx.sharing_create_shared_link_with_settings(f.path_lower).url
-                md_lines.append(f"- [{os.path.splitext(f.name)[0]}]({force_direct_download(url)})\n")
+                md.append(f"- [{os.path.splitext(f.name)[0]}]({force_dl(url)})\n")
             except Exception as e:
-                md_lines.append(f"- {f.name} (link‑error: {e})\n")
-        md_lines.append("\n")
-
-    bar.progress(1.0)
-    stat.success("✔ Done")
-    eta_box.empty()
-    return md_lines
+                md.append(f"- {f.name} (link error {e})\n")
+        md.append("\n")
+    bar.progress(1.0); stat.success("✔ Done"); eta.empty(); return md
 
 # ──────────────────────────────────────────────
-# Streamlit UI
+# UI
 # ──────────────────────────────────────────────
 
-st.set_page_config(page_title="Dropbox Markdown Generator", page_icon="★")
-st.title("★ Dropbox Markdown Link Generator – Team Edition")
+st.set_page_config(page_title="Dropbox Markdown", page_icon="★")
+st.title("★ Dropbox Markdown Link Generator – Team Edition")
 
-# Credentials & basic options
-TOKEN = st.text_input("🔐 Dropbox Access Token", type="password")
-OUTPUT_NAME = st.text_input("📝 Output Markdown File Name", "Sources.md")
-FILTER = st.text_input("🔍 Optional Filename Filter")
-FILE_KIND = st.radio("📄 File Type", ["PDF", "Excel"], horizontal=True)
+token = st.text_input("🔐 Dropbox Access Token", type="password")
+output_name = st.text_input("📝 Output file", "Sources.md")
+filter_kw = st.text_input("🔍 Filename filter (optional)")
+kind = st.radio("📄 File type", ["PDF", "Excel"], horizontal=True)
 
-cancel_pressed = st.button("✘ Cancel Generation")
+cancel = st.button("✘ Cancel")
 
-if TOKEN:
+if token:
     try:
-        # Team‑level auth
-        dbx_team = dropbox.DropboxTeam(TOKEN)
-        members = dbx_team.team_members_list().members
-        member_map = {f"{m.profile.name.display_name} ({m.profile.email})": m.profile.team_member_id for m in members}
-        sel_member = st.selectbox("👤 Act As Team Member", list(member_map.keys()))
-        dbx = dbx_team.as_user(member_map[sel_member])
-        user = dbx.users_get_current_account()
-        st.success(f"Authenticated as {user.name.display_name}")
+        team = dropbox.DropboxTeam(token)
+        members = team.team_members_list().members
+        member_map = {f"{m.profile.name.display_name} ({m.profile.email})": m.profile.team_member_id for m in members}
+        sel_member = st.selectbox("👤 Act as", list(member_map))
+        dbx = team.as_user(member_map[sel_member])
+        st.success("Authenticated ✔")
 
-        # --- Folder picker ---
         @st.cache_data(show_spinner=False)
-        def list_mounts():
-            entries = dbx.files_list_folder("", recursive=False, include_mounted_folders=True).entries
-            return [e.path_display for e in entries if isinstance(e, dropbox.files.FolderMetadata)]
+        def root_folders():
+            entries = dbx.files_list_folder("", include_mounted_folders=True).entries
+            return [e.path_display or "/" for e in entries if isinstance(e, dropbox.files.FolderMetadata)]
 
-        mounts = list_mounts()
-        pick = st.selectbox("📂 Choose Root/Mounted Folder", mounts)
-        manual = st.text_input("✏️ Or enter custom folder path (case‑sensitive)")
-        target_path = manual.strip() if manual.strip() else pick
-        if target_path.startswith("/"):
-            target_path = target_path  # API accepts with leading slash
-        else:
-            target_path = f"/{target_path}" if target_path else ""  # root if blank
+        roots = root_folders()
+        root_choice = st.selectbox("📂 Mounted folders", roots)
+        manual = st.text_input("✏️ Custom folder path", placeholder="/PAB One Bot/Forms")
+        manual = manual.replace(" /", "/").replace("/ ", "/").strip()
+        path = manual if manual else root_choice
+        if path == "/":
+            path = ""  # API root
 
-        # Preview counts
-        if st.button("🔍 Preview File Count") and target_path:
-            ext = (".pdf",) if FILE_KIND == "PDF" else (".xlsx", ".xls", ".xlsm")
-            files_preview = gather_files(dbx, target_path, ext)
-            st.info(f"{len(files_preview)} {FILE_KIND} file(s) will be processed from *{target_path}*.")
+        if st.button("🔍 Preview count") and path:
+            exts = (".pdf",) if kind == "PDF" else (".xlsx", ".xls", ".xlsm")
+            pre = gather(dbx, path, exts)
+            st.info(f"Found {len(pre)} {kind} file(s)")
 
-        # Generate button
-        if st.button("➤ Generate Markdown") and target_path:
-            ext = (".pdf",) if FILE_KIND == "PDF" else (".xlsx", ".xls", ".xlsm")
-            files_matched = gather_files(dbx, target_path, ext)
-            if FILTER:
-                files_matched = [f for f in files_matched if FILTER.lower() in f.name.lower()]
-
-            md = build_markdown(dbx, files_matched, lambda: cancel_pressed)
+        if st.button("➤ Generate Markdown") and path:
+            exts = (".pdf",) if kind == "PDF" else (".xlsx", ".xls", ".xlsm")
+            files = gather(dbx, path, exts)
+            if filter_kw:
+                files = [f for f in files if filter_kw.lower() in f.name.lower()]
+            md = make_md(dbx, files, lambda: cancel)
             if md:
-                if not OUTPUT_NAME.lower().endswith(".md"):
-                    OUTPUT_NAME += ".md"
-                buf = io.StringIO("".join(md))
-                st.download_button("⬇ Download Markdown", data=buf.getvalue(), file_name=OUTPUT_NAME, mime="text/markdown")
-    except Exception as exc:
-        st.error(f"💥 Error: {exc}")
+                if not output_name.lower().endswith(".md"):
+                    output_name += ".md"
+                st.download_button("⬇ Download MD", io.StringIO("".join(md)).getvalue(), output_name, "text/markdown")
+    except Exception as err:
+        st.error(f"💥 {err}")
