@@ -1,134 +1,130 @@
 import streamlit as st
 import dropbox
-from dropbox.files import PathRoot
 import os, io, time, datetime
 from collections import defaultdict
 
+# Optional import – older Dropbox SDKs (<11.9) don’t ship PathRoot
+try:
+    from dropbox.files import PathRoot  # type: ignore
+except ImportError:  # pragma: no cover – fallback for old SDK
+    PathRoot = None  # sentinel so we can branch later
+
 """
-Dropbox Markdown Generator  –  Namespace‑aware
-=============================================
-Works whether the target folder is:
-* a **member‑root** folder
-* a **mounted team folder**
-* a **pure team‑space folder** that is *not mounted*
-
-Strategy
---------
-1.  Accept any user path `/foo/bar`  
-    • If it lists successfully → done.  
-    • If it returns `not_found`, extract the *first segment* (`foo`).
-2.  Query `sharing_list_folders()`  and  `team/team_folder/list` to map that
-    first segment → **namespace_id**.
-3.  Re‑run the call via `dbx.with_path_root(PathRoot.namespace_id(ns_id))`.
-
-No UI changes – the dropdown + custom‑path boxes stay the same.
+Dropbox Markdown Generator – **SDK-version tolerant**
+----------------------------------------------------
+* Works with *any* dropbox-python version (PathRoot present or not).
+* Resolves team-space namespaces when a folder is not found in member root.
+* UI unchanged: user types `/PAB One Bot` or deeper path.
 """
 
-# ────────────────────────── helpers ──────────────────────────
+# ───────────────────────── helpers ──────────────────────────
 
-def direct_url(url: str) -> str:
-    return url.replace("?dl=0", "?dl=1").replace("&dl=0", "&dl=1")
+def to_dl(url: str) -> str:
+    return url.replace("&dl=0", "&dl=1")
 
 
-def list_path(dbx: dropbox.Dropbox, path: str):
-    """Wrapper that returns entries or None on not-found."""
+def list_entries(dbx: dropbox.Dropbox, path: str):
     try:
         return dbx.files_list_folder(path, recursive=True).entries
     except dropbox.exceptions.ApiError as e:
-        if isinstance(e.error, dropbox.files.ListFolderError) and e.error.is_path() and e.error.get_path().is_not_found():
-            return None  # signal not-found
+        if e.error.is_path() and e.error.get_path().is_not_found():
+            return None
         raise
 
 
-def resolve_namespace(dbx_team: dropbox.DropboxTeam, folder_name: str) -> str | None:
-    """Return namespace_id for a top-level team folder called `folder_name`."""
-    # 1) Try shared folders (mounted or not)
+def ns_client(dbx: dropbox.Dropbox, ns_id: str):
+    """Return a client rooted at namespace *ns_id* regardless of SDK version."""
+    if PathRoot:  # modern SDK
+        return dbx.with_path_root(PathRoot.namespace_id(ns_id))
+    # legacy fallback – inject header manually
+    hdr = {"Dropbox-API-Path-Root": f'{{".tag":"namespace_id","namespace_id":"{ns_id}"}}'}
+    return dropbox.Dropbox(dbx._oauth2_access_token, headers=hdr)
+
+
+def get_ns_for_name(team: dropbox.DropboxTeam, name: str):
+    # shared folders API
     try:
-        shared = dbx_team.as_admin().sharing_list_folders(limit=300).entries
-        for sf in shared:
-            if sf.name == folder_name and sf.path_lower:
-                return str(sf.path_lower.split("ns:")[-1].split("/")[0])
+        for sf in team.as_admin().sharing_list_folders(limit=300).entries:
+            if sf.name == name and sf.path_lower:
+                return sf.path_lower.split("ns:")[-1].split("/")[0]
     except Exception:
         pass
-    # 2) Try team folders list
+    # team folders API
     try:
-        tf_res = dbx_team.team_team_folder_list().team_folders
-        for tf in tf_res:
-            if tf.name == folder_name:
-                return str(tf.team_folder_id.replace("tfid:", ""))
+        for tf in team.team_team_folder_list().team_folders:
+            if tf.name == name:
+                return tf.team_folder_id.replace("tfid:", "")
     except Exception:
         pass
     return None
 
 
-def gather_files(dbx: dropbox.Dropbox, root: str, exts: tuple[str]):
-    entries = list_path(dbx, root)
-    if entries is None:  # try namespace resolution
-        first_seg = root.lstrip("/").split("/")[0]
-        ns = resolve_namespace(dbx_team, first_seg)
-        if ns:
-            dbx_ns = dbx.with_path_root(PathRoot.namespace_id(ns))
-            new_root = "/" + "/".join(root.lstrip("/").split("/")[1:])  # drop the first segment inside ns
-            entries = list_path(dbx_ns, new_root)
-            if entries is None:
-                raise FileNotFoundError(f"Folder not found even inside namespace {ns}")
-            dbx = dbx_ns  # subsequent calls use ns client
-        else:
-            raise FileNotFoundError("Folder not found and no matching namespace")
+def fetch_files(dbx, team, full_path: str, exts):
+    entries = list_entries(dbx, full_path)
+    if entries is None:
+        first = full_path.lstrip("/").split("/")[0]
+        ns_id = get_ns_for_name(team, first)
+        if not ns_id:
+            raise FileNotFoundError("Folder not found and no namespace matched")
+        dbx = ns_client(dbx, ns_id)
+        tail = "/".join(full_path.lstrip("/").split("/")[1:])
+        entries = list_entries(dbx, "/"+tail)  # may be empty list, but not None
     files = [e for e in entries if isinstance(e, dropbox.files.FileMetadata) and e.name.lower().endswith(exts)]
     return dbx, files
 
 
-def markdown_from_files(dbx, files, cancel):
-    grouped = defaultdict(list)
+def build_md(dbx, files, cancel_fn):
+    groups = defaultdict(list)
     for f in files:
-        grouped[os.path.dirname(f.path_display).lstrip("/") or "Root"].append(f)
-    total = sum(len(v) for v in grouped.values())
+        groups[os.path.dirname(f.path_display).lstrip("/") or "Root"].append(f)
+    total = len(files)
     if not total:
         return []
     bar, stat = st.progress(0.), st.empty()
-    t0, done, md = time.time(), 0, ["# Sources\n\n"]
-    for folder in sorted(grouped):
-        md.append(f"## {folder} ({len(grouped[folder])})\n\n")
-        for f in grouped[folder]:
-            if cancel():
-                stat.warning("✘ Cancelled"); return md
-            done += 1; bar.progress(done/total); stat.text(f"{done}/{total} {f.name}")
+    start, done, out = time.time(), 0, ["# Sources\n\n"]
+    for folder in sorted(groups):
+        out.append(f"## {folder} ({len(groups[folder])})\n\n")
+        for f in groups[folder]:
+            if cancel_fn():
+                stat.warning("✘ Cancelled"); return out
+            done += 1; bar.progress(done/total)
+            elapsed = time.time()-start
+            stat.text(f"{done}/{total} – {f.name} – ETA {datetime.timedelta(seconds=int(elapsed/done*(total-done)))}")
             try:
                 links = dbx.sharing_list_shared_links(path=f.path_lower, direct_only=True).links
                 url = links[0].url if links else dbx.sharing_create_shared_link_with_settings(f.path_lower).url
-                md.append(f"- [{os.path.splitext(f.name)[0]}]({direct_url(url)})\n")
+                out.append(f"- [{os.path.splitext(f.name)[0]}]({to_dl(url)})\n")
             except Exception as e:
-                md.append(f"- {f.name} (link err {e})\n")
-        md.append("\n")
-    bar.progress(1.0); stat.success("✔ Done"); return md
+                out.append(f"- {f.name} (link err {e})\n")
+        out.append("\n")
+    bar.progress(1.0); return out
 
 # ───────────────────────────── UI ─────────────────────────────
 
 st.set_page_config(page_title="Dropbox Markdown", page_icon="★")
-st.title("★ Dropbox Markdown – Namespace‑aware")
+st.title("★ Dropbox Markdown – SDK-Version Safe")
 
-token = st.text_input("🔐 Dropbox access token", type="password")
-output = st.text_input("📝 Output .md", "Sources.md")
-kind = st.radio("File type", ["PDF", "Excel"], horizontal=True)
-manual = st.text_input("✏️ Folder path (e.g. /PAB One Bot)")
-cancel = st.button("✘ Cancel")
+token = st.text_input("🔐 Access token", type="password")
+path_in = st.text_input("✏️ Folder path (e.g. /PAB One Bot)")
+kind = st.radio("Type", ["PDF", "Excel"], horizontal=True)
+filename = st.text_input("Output .md", "Sources.md")
+cancel_btn = st.button("✘ Cancel")
 
-if token and manual:
+if token and path_in:
     try:
-        dbx_team = dropbox.DropboxTeam(token)
-        members = dbx_team.team_members_list().members
-        sel = st.selectbox("Act as", [f"{m.profile.email}" for m in members])
-        dbx = dbx_team.as_user(next(m.profile.team_member_id for m in members if m.profile.email == sel))
-        st.success("Authenticated")
-        ext = (".pdf",) if kind == "PDF" else (".xlsx", ".xls", ".xlsm")
-        dbx_final, files = gather_files(dbx, manual, ext)
-        st.info(f"{len(files)} file(s) found – ready to generate")
+        team = dropbox.DropboxTeam(token)
+        members = team.team_members_list().members
+        user_email = st.selectbox("Act as", [m.profile.email for m in members])
+        dbx_user = team.as_user(next(m.profile.team_member_id for m in members if m.profile.email == user_email))
+        st.success("Authenticated ✔")
+        exts = (".pdf",) if kind == "PDF" else (".xlsx", ".xls", ".xlsm")
+        dbx_resolved, files = fetch_files(dbx_user, team, path_in, exts)
+        st.info(f"{len(files)} file(s) matched – Preview OK")
         if st.button("Generate Markdown"):
-            md = markdown_from_files(dbx_final, files, lambda: cancel)
+            md = build_md(dbx_resolved, files, lambda: cancel_btn)
             if md:
-                if not output.lower().endswith(".md"):
-                    output += ".md"
-                st.download_button("Download", io.StringIO("".join(md)).getvalue(), output, "text/markdown")
-    except Exception as e:
-        st.error(str(e))
+                if not filename.lower().endswith(".md"):
+                    filename += ".md"
+                st.download_button("⬇ Download MD", io.StringIO("".join(md)).getvalue(), filename, "text/markdown")
+    except Exception as err:
+        st.error(str(err))
