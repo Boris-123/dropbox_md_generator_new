@@ -96,9 +96,10 @@ st.set_page_config(page_title="Dropbox Markdown Generator", page_icon="★")
 st.title("★ Dropbox Markdown Link Generator")
 
 token = st.text_input("🔐 Dropbox Access Token", type="password", key="access_token")
-folder_path = st.text_input("📁 Dropbox Folder Path (e.g., /PIAS testing)", value="/", key="folder_path")
 output_filename = st.text_input("📝 Output Markdown File Name", value="Sources.md", key="output_filename")
 filter_keyword = st.text_input("🔍 Optional Filter (filename contains…)", value="", key="filter_text")
+
+type_filter = st.radio("📄 File Type to Link", options=["PDF", "Excel"], horizontal=True)
 
 cancel_flag = st.session_state.get("cancel", False)
 if st.button("✘ Cancel", key="cancel button"):
@@ -111,7 +112,7 @@ if token:
         dbx_team = dropbox.DropboxTeam(token)
         members = dbx_team.team_members_list().members
         member_options = {
-            f"{m.profile.email} → {m.profile.team_member_id}": m.profile.team_member_id
+            f"{m.profile.name.display_name} ({m.profile.email})": m.profile.team_member_id
             for m in members
         }
         selected_display = st.selectbox("👤 Select your Dropbox Identity", list(member_options.keys()))
@@ -121,39 +122,50 @@ if token:
         account = dbx.users_get_current_account()
         st.success(f"✔ Authenticated as: {account.name.display_name}")
 
-        # Show available mount points (debug and guidance)
-        try:
-            mounts = dbx.files_list_folder(path="").entries
-            st.markdown("#### 🗂 Available root folders:")
-            for entry in mounts:
-                st.write(entry.name)
-        except Exception as e:
-            st.warning(f"⚠ Unable to list visible root folders: {e}")
+        def get_all_folders(path=""):
+            folder_list = []
+            try:
+                entries = dbx.files_list_folder(path, recursive=True).entries
+                for e in entries:
+                    if isinstance(e, dropbox.files.FolderMetadata):
+                        folder_list.append(e.path_display)
+                return folder_list
+            except Exception as e:
+                st.warning(f"⚠ Failed to list folders: {e}")
+                return []
+
+        folder_choices = get_all_folders()
+        selected_folder_path = st.selectbox("📂 Choose a folder to scan:", folder_choices)
 
         if st.button("➤ Generate Markdown", key="generate_button"):
-            if not folder_path or not output_filename:
-                st.error("⚠ Please fill in all required fields.")
+            if not output_filename:
+                st.error("⚠ Please fill in the output filename.")
             else:
-                pdfs = gather_all_pdfs(dbx, folder_path)
-                st.write(f"Found {len(pdfs)} PDF(s) in the specified folder.")
-                lines = generate_sources(
-                    dbx,
-                    pdfs,
-                    cancel_flag=lambda: st.session_state["cancel"],
-                    filter_keyword=filter_keyword
-                )
+                try:
+                    ext = ".pdf" if type_filter == "PDF" else ".xlsx"
+                    pdfs = gather_all_pdfs(dbx, selected_folder_path)
+                    files_filtered = [f for f in pdfs if f.name.lower().endswith(ext)]
+                    st.write(f"📄 Found {len(files_filtered)} {type_filter} file(s) in the folder.")
+                    lines = generate_sources(
+                        dbx,
+                        files_filtered,
+                        cancel_flag=lambda: st.session_state["cancel"],
+                        filter_keyword=filter_keyword
+                    )
 
-                if not output_filename.lower().endswith(".md"):
-                    output_filename += ".md"
+                    if not output_filename.lower().endswith(".md"):
+                        output_filename += ".md"
 
-                output_buffer = io.StringIO()
-                output_buffer.writelines(lines)
+                    output_buffer = io.StringIO()
+                    output_buffer.writelines(lines)
 
-                st.download_button(
-                    label="⬇ Download Markdown File",
-                    data=output_buffer.getvalue(),
-                    file_name=output_filename,
-                    mime="text/markdown"
-                )
+                    st.download_button(
+                        label="⬇ Download Markdown File",
+                        data=output_buffer.getvalue(),
+                        file_name=output_filename,
+                        mime="text/markdown"
+                    )
+                except Exception as e:
+                    st.error(f"✘ Error: {e}")
     except Exception as e:
         st.error(f"✘ Error: {e}")
