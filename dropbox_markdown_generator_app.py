@@ -9,8 +9,8 @@ from collections import defaultdict
 # ------------------------------------------------------------
 try:
     from dropbox.files import PathRoot  # SDK ≥11.9
-except ImportError:  # pragma: no cover – old SDK
-    PathRoot = None  # sentinel
+except ImportError:
+    PathRoot = None  # sentinel for old SDKs
 
 # ------------------------------------------------------------
 #  Dropbox‑specific utilities
@@ -31,16 +31,15 @@ def force_dl(url: str) -> str:
 
 
 def make_member_client(team: dropbox.DropboxTeam, member_id: str) -> dropbox.Dropbox:
+    """Return a client that always includes Dropbox‑API‑Select‑User."""
     try:
         return team.as_user(member_id)  # modern SDK
-    except AttributeError:  # old SDK
-        return dropbox.Dropbox(
-            team._oauth2_access_token,
-            headers={"Dropbox-API-Select-User": member_id},
-        )
+    except AttributeError:
+        return dropbox.Dropbox(team._oauth2_access_token, headers={"Dropbox-API-Select-User": member_id})
 
 
 def ns_scoped_client(base: dropbox.Dropbox, ns_id: str) -> dropbox.Dropbox:
+    """Return *base* rooted at *ns_id* and compatible with old SDKs."""
     if PathRoot:
         return base.with_path_root(PathRoot.namespace_id(ns_id))
     hdr = {"Dropbox-API-Path-Root": f'{{".tag":"namespace_id","namespace_id":"{ns_id}"}}'}
@@ -51,6 +50,7 @@ def ns_scoped_client(base: dropbox.Dropbox, ns_id: str) -> dropbox.Dropbox:
 # ------------------------------------------------------------
 
 def resolve_namespace(team: dropbox.DropboxTeam, top_name: str) -> str | None:
+    """Return namespace‑id whose top‑level folder name is *top_name*."""
     try:  # shared folders
         for sf in team.as_admin().sharing_list_folders(limit=300).entries:
             if sf.name == top_name and sf.path_lower:
@@ -66,32 +66,38 @@ def resolve_namespace(team: dropbox.DropboxTeam, top_name: str) -> str | None:
     return None
 
 # ------------------------------------------------------------
-#  File gathering (recursive) with root‑path fix
+#  File gathering helpers (pagination + root‑path fix)
 # ------------------------------------------------------------
 
-def try_list(dbx: dropbox.Dropbox, path: str):
-    try:
-        return dbx.files_list_folder(path, recursive=True).entries
-    except dropbox.exceptions.ApiError as e:
-        if e.error.is_path() and e.error.get_path().is_not_found():
-            return None
-        raise
+def list_folder_all(dbx: dropbox.Dropbox, path: str, recursive: bool = True):
+    """Return *all* entries under *path*, transparently following cursors."""
+    res = dbx.files_list_folder(path, recursive=recursive)
+    entries = res.entries
+    while res.has_more:
+        res = dbx.files_list_folder_continue(res.cursor)
+        entries.extend(res.entries)
+    return entries
 
 
 def get_files(dbx_user: dropbox.Dropbox, team: dropbox.DropboxTeam, full_path: str, exts):
     full_path = norm_dropbox_path(full_path)
-    entries = try_list(dbx_user, full_path)
-    if entries is None:  # maybe inside a team namespace
+
+    # 1️⃣ Try member space first
+    entries = list_folder_all(dbx_user, full_path)
+
+    # 2️⃣ If nothing, maybe the folder is in a team namespace
+    if not entries:
         first_seg = full_path.lstrip("/").split("/")[0]
         ns_id = resolve_namespace(team, first_seg)
         if not ns_id:
             raise FileNotFoundError("Folder not found and no matching team namespace")
         dbx_ns = ns_scoped_client(dbx_user, ns_id)
         inner = norm_dropbox_path("/".join(full_path.lstrip("/").split("/")[1:]))
-        entries = try_list(dbx_ns, inner)
-        if entries is None:
+        entries = list_folder_all(dbx_ns, inner)
+        if not entries:
             raise FileNotFoundError("Folder not found even inside team namespace")
-        dbx_user = dbx_ns  # use namespaced client for link generation
+        dbx_user = dbx_ns  # subsequent link calls need namespace client
+
     files = [f for f in entries if isinstance(f, dropbox.files.FileMetadata) and f.name.lower().endswith(exts)]
     return dbx_user, files
 
@@ -105,7 +111,7 @@ def fmt_hms(sec: float) -> str:
 
 def build_md(dbx: dropbox.Dropbox, files, is_cancelled):
     """Generate markdown list. Shows realtime ETA (time remaining)."""
-    groups: dict[str, list] = defaultdict(list)
+    groups = defaultdict(list)
     for f in files:
         groups[os.path.dirname(f.path_display).lstrip("/") or "Root"].append(f)
 
@@ -114,9 +120,9 @@ def build_md(dbx: dropbox.Dropbox, files, is_cancelled):
         return []
 
     bar = st.progress(0.0)
-    eta_box = st.empty()   # dedicated ETA line
-    status_box = st.empty()  # current‑file info
-    md: list[str] = ["# Sources\n\n"]
+    eta_box = st.empty()    # realtime ETA display
+    status_box = st.empty()  # current file
+    md = ["# Sources\n\n"]
 
     processed = 0
     for folder in sorted(groups):
@@ -128,7 +134,7 @@ def build_md(dbx: dropbox.Dropbox, files, is_cancelled):
 
             processed += 1
             elapsed = time.time() - st.session_state.start_time
-            eta_total = (elapsed / processed) * total  # projected total time
+            eta_total = (elapsed / processed) * total
             eta_remaining = max(0.0, eta_total - elapsed)
 
             bar.progress(processed / total)
@@ -144,8 +150,7 @@ def build_md(dbx: dropbox.Dropbox, files, is_cancelled):
         md.append("\n")
 
     bar.progress(1.0)
-    total_time = time.time() - st.session_state.start_time
-    eta_box.success(f"✔ Completed in {fmt_hms(total_time)}")
+    eta_box.success(f"✔ Completed in {fmt_hms(time.time() - st.session_state.start_time)}")
     return md
 
 # ------------------------------------------------------------
@@ -169,21 +174,21 @@ folder_path = st.text_input("📁 Folder path (leave blank for root, e.g. /PAB_O
 kind = st.radio("Type", ["PDF", "Excel"], horizontal=True)
 filename = st.text_input("📝 Output filename", "Sources.md")
 
-col1, col2 = st.columns(2)
-with col1:
-    generate_clicked = st.button("Generate", disabled=st.session_state.running)
-with col2:
-    cancel_clicked = st.button("Cancel", disabled=not st.session_state.running)
+c1, c2 = st.columns(2)
+with c1:
+    gen_click = st.button("Generate", disabled=st.session_state.running)
+with c2:
+    cancel_click = st.button("Cancel", disabled=not st.session_state.running)
 
-# --- Button handlers ---
-if generate_clicked:
+# --- Button logic ---
+if gen_click:
     st.session_state.running = True
     st.session_state.cancel = False
     st.session_state.start_time = time.time()
 
-if cancel_clicked:
+if cancel_click:
     st.session_state.cancel = True
-    st.warning("Cancelling… please wait. This stops after the current file.")
+    st.warning("Cancelling… will stop after this file.")
 
 # --- Main work ---
 if st.session_state.running and token:
@@ -205,9 +210,7 @@ if st.session_state.running and token:
         if md and not st.session_state.cancel:
             if not filename.lower().endswith(".md"):
                 filename += ".md"
-            st.download_button(
-                "⬇ Download", io.StringIO("".join(md)).getvalue(), filename, "text/markdown"
-            )
+            st.download_button("⬇ Download", io.StringIO("".join(md)).getvalue(), filename, "text/markdown")
     except Exception as e:
         st.session_state.running = False
         st.error(str(e))
