@@ -222,7 +222,7 @@ if st.session_state.running and not st.session_state.cancel and st.session_state
 
     # reschedule another run if there is more work
     if st.session_state.processed < len(files) and not st.session_state.cancel:
-        st.experimental_rerun()
+        st.rerun()
 
 # ────────────────────────────────────────────────────────────
 #  Finishing up
